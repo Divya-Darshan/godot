@@ -2819,6 +2819,16 @@ static_assert(ENUM_MEMBERS_EQUAL(RDD::BARRIER_ACCESS_FRAGMENT_DENSITY_MAP_ATTACH
 static_assert(ENUM_MEMBERS_EQUAL(RDD::BARRIER_ACCESS_ACCELERATION_STRUCTURE_READ_BIT, VK_ACCESS_ACCELERATION_STRUCTURE_READ_BIT_KHR));
 static_assert(ENUM_MEMBERS_EQUAL(RDD::BARRIER_ACCESS_ACCELERATION_STRUCTURE_WRITE_BIT, VK_ACCESS_ACCELERATION_STRUCTURE_WRITE_BIT_KHR));
 
+static VkPipelineStageFlags _remove_pipeline_stage_shader_bits(VkPipelineStageFlags p_flags) {
+	p_flags &= ~(VK_PIPELINE_STAGE_VERTEX_SHADER_BIT |
+			VK_PIPELINE_STAGE_TESSELLATION_CONTROL_SHADER_BIT |
+			VK_PIPELINE_STAGE_TESSELLATION_EVALUATION_SHADER_BIT |
+			VK_PIPELINE_STAGE_GEOMETRY_SHADER_BIT |
+			VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT |
+			VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
+	return p_flags;
+}
+
 void RenderingDeviceDriverVulkan::command_pipeline_barrier(
 		CommandBufferID p_cmd_buffer,
 		BitField<PipelineStageBits> p_src_stages,
@@ -2874,20 +2884,23 @@ void RenderingDeviceDriverVulkan::command_pipeline_barrier(
 
 	VkBufferMemoryBarrier *vk_accel_barriers = ALLOCA_ARRAY(VkBufferMemoryBarrier, p_acceleration_structure_barriers.size());
 	for (uint32_t i = 0; i < p_acceleration_structure_barriers.size(); i++) {
-		// If the rayQuery feature is not enabled and a memory barrier srcAccessMask includes
-		// VK_ACCESS_ACCELERATION_STRUCTURE_READ_BIT_KHR, srcStageMask must not include any of the
-		// VK_PIPELINE_STAGE_*_SHADER_BIT stages except VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR
 		VkAccessFlags src_access = _rd_to_vk_access_flags(p_acceleration_structure_barriers[i].src_access);
-		if ((src_access & VK_ACCESS_ACCELERATION_STRUCTURE_READ_BIT_KHR) != 0) {
-			accel_src_stages &= ~(VK_PIPELINE_STAGE_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
-		}
-
-		// If the rayQuery feature is not enabled and a memory barrier dstAccessMask includes
-		// VK_ACCESS_ACCELERATION_STRUCTURE_READ_BIT_KHR, dstStageMask must not include any of the
-		// VK_PIPELINE_STAGE_*_SHADER_BIT stages except VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR
 		VkAccessFlags dst_access = _rd_to_vk_access_flags(p_acceleration_structure_barriers[i].dst_access);
-		if ((dst_access & VK_ACCESS_ACCELERATION_STRUCTURE_READ_BIT_KHR) != 0) {
-			accel_dst_stages &= ~(VK_PIPELINE_STAGE_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
+
+		if (!ray_query_support) {
+			// If the rayQuery feature is not enabled and a memory barrier srcAccessMask includes
+			// VK_ACCESS_ACCELERATION_STRUCTURE_READ_BIT_KHR, srcStageMask must not include any of the
+			// VK_PIPELINE_STAGE_*_SHADER_BIT stages except VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR
+			if ((src_access & VK_ACCESS_ACCELERATION_STRUCTURE_READ_BIT_KHR) != 0) {
+				accel_src_stages &= _remove_pipeline_stage_shader_bits(accel_src_stages);
+			}
+
+			// If the rayQuery feature is not enabled and a memory barrier dstAccessMask includes
+			// VK_ACCESS_ACCELERATION_STRUCTURE_READ_BIT_KHR, dstStageMask must not include any of the
+			// VK_PIPELINE_STAGE_*_SHADER_BIT stages except VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR
+			if ((dst_access & VK_ACCESS_ACCELERATION_STRUCTURE_READ_BIT_KHR) != 0) {
+				accel_dst_stages = _remove_pipeline_stage_shader_bits(accel_dst_stages);
+			}
 		}
 
 		const AccelerationStructureInfo *accel_info = (const AccelerationStructureInfo *)p_acceleration_structure_barriers[i].acceleration_structure.id;
@@ -6470,12 +6483,13 @@ void RenderingDeviceDriverVulkan::raytracing_pipeline_free(RaytracingPipelineID 
 #endif
 }
 
-bool RenderingDeviceDriverVulkan::raytracing_pipeline_get_shader_group_handles(RaytracingPipelineID p_pipeline, uint32_t p_group_index_offset, VectorView<uint32_t> p_group_indices, uint8_t *r_data) {
+bool RenderingDeviceDriverVulkan::raytracing_pipeline_get_shader_group_handles(RaytracingPipelineID p_pipeline, uint32_t p_group_index_offset, VectorView<uint32_t> p_group_indices, uint8_t *r_data, uint32_t p_data_stride_bytes) {
 #if VULKAN_RAYTRACING_ENABLED
+	ERR_FAIL_COND_V_MSG(p_data_stride_bytes < raytracing_capabilities.shader_group_handle_size, false, "Data stride must be at least the size of shader group handles.");
 	for (uint32_t i = 0; i < p_group_indices.size(); i++) {
 		VkResult err = vkGetRayTracingShaderGroupHandlesKHR(vk_device, (VkPipeline)p_pipeline.id, p_group_index_offset + p_group_indices[i], 1, raytracing_capabilities.shader_group_handle_size, r_data);
 		ERR_FAIL_COND_V_MSG(err != VK_SUCCESS, false, "vkGetRayTracingShaderGroupHandlesKHR failed with error " + itos(err) + ".");
-		r_data += raytracing_capabilities.shader_group_handle_size;
+		r_data += p_data_stride_bytes;
 	}
 	return true;
 #else
